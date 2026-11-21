@@ -1,0 +1,32 @@
+{
+  "name": "clashadmin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "oxshan",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"tsx watch server/index.ts\" \"vite\"",
+    "build": "vue-tsc --noEmit && vite build",
+    "start": "tsx server/index.ts",
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.8",
+    "hono": "4.13.18",
+    "qrcode-generator": "2.0.4",
+    "tsx": "4.23.15",
+    "vue": "3.5.45",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@vitejs/plugin-vue": "6.0.11",
+    "concurrently": "10.0.7",
+    "typescript": "6.0.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.0",
+    "vue-tsc": "3.3.14"
+  }
+}

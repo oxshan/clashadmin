@@ -1,0 +1,16 @@
+services:
+  clashadmin:
+    build: .
+    image: clashadmin:latest
+    container_name: clashadmin
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: .env
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      HOST: 0.0.0.0
+      PORT: 8787
+    ports:
+      - "${BIND:-0.0.0.0}:${PORT:-8787}:8787"
+    volumes:
+      - ./data:/app/data
