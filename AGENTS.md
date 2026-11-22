@@ -28,3 +28,4 @@ Env: `ADMIN_PASSWORD`, `IMPORT_ALLOW_PRIVATE`, `PUBLIC_URL` (when set, the origi
 - Dependencies are pinned to exact versions; prefer releases at least 7 days old.
 - New protocols: add a parser in `shared/parse.ts` and a test in `shared/shared.test.ts`.
 - New output formats: add a renderer in `shared/render.ts` and a `target` case in `/sub/:token/:target`.
+- Chains: Clash uses `dialer-proxy`; Shadowrocket uses a `chain=<dialer name>` query parameter on the node link (undocumented, confirmed on a real device). Both come from `plan()` in `shared/render.ts`; Shadowrocket drops chained nodes whose protocol is in `ROCKET_NO_CHAIN` or whose dialer is not in its output, with a warning, rather than letting them connect directly.

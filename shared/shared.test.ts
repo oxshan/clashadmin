@@ -201,6 +201,50 @@ describe('renderShadowrocket', () => {
     expect(lines[0]).toBe(`${VLESS.split('#')[0]}#${encodeURIComponent('改名 1')}`)
     expect(lines[1]).toBe(HY2)
   })
+
+  it('adds the dialer as a chain parameter', () => {
+    const nodes = records()
+    nodes[0].dialerId = 'n1'
+    const out = renderShadowrocket(nodes)
+    expect(out.warnings).toEqual([])
+    expect(out.text.split('\n')).toEqual([`${VLESS.split('#')[0]}&chain=hy2-demo#vl-reality-vision-demo`, HY2, TUIC])
+
+    Object.assign(nodes[0], { keepDirect: true })
+    nodes[1].name = '前置 1'
+    const lines = renderShadowrocket(nodes).text.split('\n')
+    expect(lines[0]).toBe(VLESS)
+    expect(lines[1]).toBe(`${VLESS.split('#')[0]}&chain=${encodeURIComponent('前置 1')}#${encodeURIComponent('vl-reality-vision-demo ⟵ 前置 1')}`)
+  })
+
+  it('appends the chain parameter to vmess links', () => {
+    const { nodes } = parseClashYaml('proxies: [{name: v, type: vmess, server: a.com, port: 1, uuid: u}, {name: s, type: socks5, server: b.com, port: 2}]')
+    const recs = nodes.map((n, i) => ({ ...n, id: `y${i}`, enabled: true, dialerId: i ? null : 'y1', keepDirect: false }))
+    const [vm] = renderShadowrocket(recs).text.split('\n')
+    expect(vm).toMatch(/^vmess:\/\/[A-Za-z0-9+/=]+\?chain=s$/)
+    expect(JSON.parse(Buffer.from(vm.slice(8).split('?')[0], 'base64').toString()).ps).toBe('v')
+  })
+
+  it('drops chained nodes that shadowrocket cannot chain instead of going direct', () => {
+    const nodes = records()
+    nodes[2].dialerId = 'n0'
+    const udp = renderShadowrocket(nodes)
+    expect(udp.text.split('\n')).toEqual([VLESS, HY2])
+    expect(udp.warnings).toHaveLength(1)
+    expect(udp.warnings[0]).toMatch('tuic-demo')
+
+    nodes[2].dialerId = null
+    nodes[0].dialerId = 'n1'
+    nodes[1].dialerId = 'n2'
+    const nested = renderShadowrocket(nodes)
+    expect(nested.text).toBe(TUIC)
+    expect(nested.warnings).toHaveLength(2)
+
+    nodes[1].dialerId = null
+    nodes[1].enabled = false
+    const disabled = renderShadowrocket(nodes)
+    expect(disabled.text).toBe(TUIC)
+    expect(disabled.warnings).toEqual(renderClash(nodes).warnings)
+  })
 })
 
 describe('clash yaml import', () => {

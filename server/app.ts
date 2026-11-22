@@ -90,7 +90,7 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
   app.get('/api/preview', (c) => {
     const { yaml, warnings } = renderClash(state.nodes)
     const rocket = renderShadowrocket(state.nodes)
-    return c.json({ clash: yaml, shadowrocket: rocket.text, warnings: [...warnings, ...rocket.warnings] } satisfies Preview)
+    return c.json({ clash: yaml, shadowrocket: rocket.text, warnings: [...new Set([...warnings, ...rocket.warnings])] } satisfies Preview)
   })
 
   app.post('/api/nodes/import', async (c) => {

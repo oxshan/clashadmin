@@ -61,7 +61,7 @@ describe('api', () => {
 
     const rocket = await call('/sub/secret-token/shadowrocket')
     const lines = Buffer.from(await rocket.text(), 'base64').toString().split('\n')
-    expect(lines).toEqual([LINES.split('\n')[0], LINES.split('\n')[1]])
+    expect(lines).toEqual([LINES.split('\n')[0], LINES.split('\n')[1].replace('#', '&chain=front#')])
 
     await call('/api/token/reset', 'POST')
     expect((await call('/sub/secret-token/clash')).status).toBe(404)
