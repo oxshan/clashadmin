@@ -1,5 +1,5 @@
 import { reactive } from 'vue'
-import type { AppState, BatchAction, ImportResult, NodeRecord, Preview, YamlPreview } from '../shared/types'
+import type { AppState, BatchAction, ImportResult, NodeRecord, Preview, Rule, YamlPreview } from '../shared/types'
 
 export const session = reactive<{ authed: boolean | null }>({ authed: null })
 
@@ -34,5 +34,10 @@ export const api = {
   patchNode: (id: string, patch: NodePatch) => request<AppState>(`/api/nodes/${id}`, 'PATCH', patch),
   deleteNode: (id: string) => request<AppState>(`/api/nodes/${id}`, 'DELETE'),
   reorder: (ids: string[]) => request<AppState>('/api/nodes/reorder', 'POST', { ids }),
+  addRules: (text: string, target: string) => request<ImportResult>('/api/rules', 'POST', { text, target }),
+  putRule: (id: string, rule: Rule) => request<AppState>(`/api/rules/${id}`, 'PUT', rule),
+  deleteRules: (ids: string[]) => request<AppState>('/api/rules/delete', 'POST', { ids }),
+  reorderRules: (ids: string[]) => request<AppState>('/api/rules/reorder', 'POST', { ids }),
+  resetRules: () => request<AppState>('/api/rules/reset', 'POST'),
   resetToken: () => request<AppState>('/api/token/reset', 'POST'),
 }

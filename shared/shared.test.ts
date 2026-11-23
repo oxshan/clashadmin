@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import { parseLines, parseUri } from './parse'
-import { chainError, renderClash, renderShadowrocket } from './render'
+import { chainError, nodeNames, renamed, renderClash, renderShadowrocket, ruleTargets } from './render'
+import { defaultRules, formatRule, parseRule, parseRules } from './rules'
 import type { NodeRecord } from './types'
 import { parseClashYaml, parseProxyYaml, toUri } from './yaml'
 
@@ -328,5 +329,75 @@ proxies:
     expect(() => parseProxyYaml('- a')).toThrow('字段映射')
     expect(() => parseProxyYaml('{name: a, type: socks5, server: 1.1.1.1, port: 0}')).toThrow('端口')
     expect(() => parseProxyYaml('{name: a, type: socks5, server: 1.1.1.1, port: 1, dialer-proxy: b}')).toThrow('前置')
+  })
+})
+
+describe('rules', () => {
+  const LINES = ['DOMAIN-SUFFIX,google.com,proxy', 'GEOIP,CN,DIRECT,no-resolve', 'MATCH,proxy', 'AND,((DOMAIN,baidu.com),(NETWORK,UDP)),REJECT']
+
+  it('parses and formats every rule shape', () => {
+    expect(parseRule(LINES[0])).toEqual({ type: 'DOMAIN-SUFFIX', payload: 'google.com', target: 'proxy', options: [] })
+    expect(parseRule(' geoip , CN , DIRECT , no-resolve ')).toEqual({ type: 'GEOIP', payload: 'CN', target: 'DIRECT', options: ['no-resolve'] })
+    expect(parseRule(LINES[2])).toEqual({ type: 'MATCH', payload: '', target: 'proxy', options: [] })
+    expect(parseRule(LINES[3])).toEqual({ type: 'AND', payload: '((DOMAIN,baidu.com),(NETWORK,UDP))', target: 'REJECT', options: [] })
+    expect(parseRule("- 'IP-CIDR,10.0.0.0/8,DIRECT,no-resolve'")).toMatchObject({ type: 'IP-CIDR', target: 'DIRECT', options: ['no-resolve'] })
+    expect(LINES.map((line) => formatRule(parseRule(line)))).toEqual(LINES)
+  })
+
+  it('fills a missing target and rejects rules it cannot output', () => {
+    expect(parseRule('DOMAIN,a.com', 'DIRECT').target).toBe('DIRECT')
+    expect(parseRule('IP-CIDR,1.1.1.1/32,no-resolve', 'proxy')).toMatchObject({ target: 'proxy', options: ['no-resolve'] })
+    expect(() => parseRule('DOMAIN,a.com')).toThrow('目标')
+    expect(() => parseRule('DOMAIN,,proxy')).toThrow('匹配内容')
+    expect(() => parseRule('FOO,a.com,proxy')).toThrow('规则类型')
+    expect(() => parseRule('RULE-SET,ads,REJECT')).toThrow('rule-providers')
+    expect(() => parseRule('GEOIP,CN,DIRECT,nope')).toThrow('参数')
+    expect(() => parseRule('AND,(DOMAIN,a.com,proxy')).toThrow('括号')
+    expect(() => parseRule('MATCH,proxy,no-resolve')).toThrow('MATCH')
+    expect(() => parseRule('DOMAIN,a.com,nobody', '', ['proxy'])).toThrow('nobody')
+  })
+
+  it('parses pasted lists, skipping blanks, comments and duplicates', () => {
+    const text = ['rules:', '  - DOMAIN,a.com,proxy', '# note', '', 'DOMAIN,a.com,proxy', 'DOMAIN,b.com', 'bad', 'GEOIP,CN,DIRECT'].join('\n')
+    const { rules, errors } = parseRules(text, { fallback: 'DIRECT', targets: ['proxy', 'DIRECT'], existing: [parseRule('GEOIP,CN,DIRECT')] })
+    expect(rules.map(formatRule)).toEqual(['DOMAIN,a.com,proxy', 'DOMAIN,b.com,DIRECT'])
+    expect(errors.map((e) => [e.line, Boolean(e.duplicate)])).toEqual([
+      [5, true],
+      [7, false],
+      [8, true],
+    ])
+  })
+
+  it('renders stored rules and drops the ones whose target is not in the output', () => {
+    const nodes = records()
+    const rules = ['DOMAIN,a.com,hy2-demo', 'DOMAIN,b.com,gone', 'MATCH,proxy'].map((line) => parseRule(line))
+    const out = renderClash(nodes, rules)
+    expect(parse(out.yaml).rules).toEqual(['DOMAIN,a.com,hy2-demo', 'MATCH,proxy'])
+    expect(out.warnings).toHaveLength(1)
+    expect(out.warnings[0]).toContain('DOMAIN,b.com,gone')
+    nodes[1].enabled = false
+    expect(parse(renderClash(nodes, rules).yaml).rules).toEqual(['MATCH,proxy'])
+    expect(ruleTargets(nodes)).toEqual(['proxy', 'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'vl-reality-vision-demo', 'tuic-demo'])
+  })
+
+  it('maps old names to new ones across a rename, including disabled and chained nodes', () => {
+    const nodes = records()
+    Object.assign(nodes[0], { dialerId: 'n1', keepDirect: true })
+    nodes[1].enabled = false
+    const before = nodeNames(nodes)
+    nodes[1].name = nodes[1].proxy.name = 'osaka'
+    expect([...renamed(before, nodeNames(nodes))]).toEqual([
+      ['vl-reality-vision-demo ⟵ hy2-demo', 'vl-reality-vision-demo ⟵ osaka'],
+      ['hy2-demo', 'osaka'],
+    ])
+  })
+
+  it('keeps the default rules valid and warns when MATCH is missing or not last', () => {
+    const nodes = records()
+    const defaults = renderClash(nodes)
+    expect(defaults.warnings).toEqual([])
+    expect(parse(defaults.yaml).rules).toEqual(defaultRules.map(formatRule))
+    expect(renderClash(nodes, [parseRule('DOMAIN,a.com,proxy')]).warnings.join()).toContain('没有 MATCH')
+    expect(renderClash(nodes, ['MATCH,proxy', 'DOMAIN,a.com,proxy'].map((line) => parseRule(line))).warnings.join()).toContain('不会生效')
   })
 })

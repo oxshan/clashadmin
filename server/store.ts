@@ -1,17 +1,20 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import type { AppState } from '../shared/types'
+import { defaultRules } from '../shared/rules'
+import type { AppState, RuleRecord } from '../shared/types'
 import { type AuthData, hashPassword, matchesPassword } from './auth'
 
 const file = resolve(process.env.DATA_FILE ?? 'data/db.json')
 const authFile = resolve(dirname(file), 'auth.json')
 
 export const newToken = () => randomBytes(24).toString('base64url')
+export const seedRules = (): RuleRecord[] => defaultRules.map((r) => ({ ...r, options: [...r.options], id: randomUUID() }))
 
 export function load(): AppState {
-  if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8')) as AppState
-  return save({ token: newToken(), nodes: [] })
+  if (!existsSync(file)) return save({ token: newToken(), nodes: [], rules: seedRules() })
+  const state = JSON.parse(readFileSync(file, 'utf8')) as AppState
+  return state.rules ? state : save({ ...state, rules: seedRules() })
 }
 
 function write<T>(path: string, value: T): T {

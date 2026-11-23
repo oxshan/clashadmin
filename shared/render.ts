@@ -1,6 +1,7 @@
 import { stringify } from 'yaml'
-import { GROUP, general, rules } from './template'
-import type { ClashProxy, NodeRecord } from './types'
+import { POLICIES, defaultRules, formatRule } from './rules'
+import { GROUP, general } from './template'
+import type { ClashProxy, NodeRecord, Rule } from './types'
 import { toUri } from './yaml'
 
 export const chainName = (node: string, dialer: string) => `${node} ⟵ ${dialer}`
@@ -50,6 +51,15 @@ function plan(nodes: NodeRecord[]): { items: Planned[]; warnings: string[] } {
   return { items, warnings }
 }
 
+const outputNames = (nodes: NodeRecord[]) => new Map(plan(nodes).items.map((i) => [`${i.node.id}/${i.dialer ? 'chain' : 'direct'}`, i.name]))
+
+export const ruleTargets = (nodes: NodeRecord[]) => [...POLICIES, ...outputNames(nodes).values()]
+
+export const nodeNames = (nodes: NodeRecord[]) => outputNames(nodes.map((n) => ({ ...n, enabled: true })))
+
+export const renamed = (before: Map<string, string>, after: Map<string, string>) =>
+  new Map([...before].flatMap(([key, name]): [string, string][] => (after.has(key) && after.get(key) !== name ? [[name, after.get(key)!]] : [])))
+
 export function buildProxies(nodes: NodeRecord[]): { proxies: ClashProxy[]; warnings: string[] } {
   const { items, warnings } = plan(nodes)
   const proxies = items.map(({ node, name, dialer }): ClashProxy => {
@@ -60,13 +70,19 @@ export function buildProxies(nodes: NodeRecord[]): { proxies: ClashProxy[]; warn
   return { proxies, warnings }
 }
 
-export function renderClash(nodes: NodeRecord[]): { yaml: string; warnings: string[] } {
+export function renderClash(nodes: NodeRecord[], rules: Rule[] = defaultRules): { yaml: string; warnings: string[] } {
   const { proxies, warnings } = buildProxies(nodes)
+  const targets = new Set([...POLICIES, ...proxies.map((p) => p.name)])
+  const kept = rules.filter((r) => targets.has(r.target))
+  for (const r of rules) if (!targets.has(r.target)) warnings.push(`规则「${formatRule(r)}」的目标节点不在订阅里（已删除、已禁用或前置不可用），该规则未输出`)
+  const match = kept.findIndex((r) => r.type === 'MATCH')
+  if (match < 0) warnings.push('规则里没有 MATCH 兜底，没有命中任何规则的流量会直连')
+  else if (match < kept.length - 1) warnings.push(`MATCH 之后的 ${kept.length - 1 - match} 条规则不会生效，请把 MATCH 移到最后`)
   const config = {
     ...general,
     proxies,
     'proxy-groups': [{ name: GROUP, type: 'select', proxies: [...proxies.map((p) => p.name), 'DIRECT'] }],
-    rules,
+    rules: kept.map(formatRule),
   }
   return { yaml: stringify(config, { lineWidth: 0 }), warnings }
 }

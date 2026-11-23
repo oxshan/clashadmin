@@ -3,11 +3,12 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import qrcode from 'qrcode-generator'
 import { stringify } from 'yaml'
 import { parseLines } from '../shared/parse'
-import { chainError } from '../shared/render'
-import type { AppState, BatchAction, NodeRecord, ParseError, Preview, YamlPreview } from '../shared/types'
+import { chainError, nodeNames, renamed, ruleTargets } from '../shared/render'
+import { POLICIES, RULE_OPTIONS, RULE_TYPES, formatRule, parseRules } from '../shared/rules'
+import type { AppState, BatchAction, NodeRecord, ParseError, Preview, RuleRecord, YamlPreview } from '../shared/types'
 import { api, type NodePatch, session } from './api'
 
-const state = ref<AppState>({ token: '', nodes: [] })
+const state = ref<AppState>({ token: '', nodes: [], rules: [] })
 const preview = ref<Preview>({ clash: '', shadowrocket: '', warnings: [] })
 const input = ref('')
 const error = ref('')
@@ -63,13 +64,14 @@ watch(
   () => session.authed,
   (authed) => {
     if (authed) return loadAll()
-    state.value = { token: '', nodes: [] }
+    state.value = { token: '', nodes: [], rules: [] }
     preview.value = { clash: '', shadowrocket: '', warnings: [] }
-    input.value = error.value = ''
+    input.value = ruleInput.value = error.value = ''
     yamlPreview.value = yamlResult.value = null
-    picked.value = []
+    picked.value = pickedRules.value = []
     loaded.value = false
     dialog.value?.close()
+    ruleDialog.value?.close()
   },
 )
 
@@ -187,10 +189,79 @@ function remove(node: NodeRecord) {
   if (confirm(`删除节点「${node.name}」？${extra}`)) run(() => api.deleteNode(node.id))
 }
 
-function move(index: number, delta: number) {
-  const ids = state.value.nodes.map((n) => n.id)
+function swapped(list: { id: string }[], index: number, delta: number) {
+  const ids = list.map((item) => item.id)
   ;[ids[index], ids[index + delta]] = [ids[index + delta], ids[index]]
-  run(() => api.reorder(ids))
+  return ids
+}
+
+const move = (index: number, delta: number) => run(() => api.reorder(swapped(state.value.nodes, index, delta)))
+
+const targets = computed(() => ruleTargets(state.value.nodes))
+const ruleInput = ref('')
+const ruleTarget = ref(POLICIES[0])
+watch(
+  () => state.value.nodes,
+  (now, old) => {
+    const target = renamed(nodeNames(old), nodeNames(now)).get(ruleTarget.value) ?? ruleTarget.value
+    ruleTarget.value = targets.value.includes(target) ? target : POLICIES[0]
+  },
+)
+const parsedRules = computed(() => parseRules(ruleInput.value, { fallback: ruleTarget.value, targets: targets.value, existing: state.value.rules }))
+const badRules = computed(() => parsedRules.value.errors.filter((e) => !e.duplicate).length)
+
+const addRules = () =>
+  run(async () => {
+    const { errors, state: next } = await api.addRules(ruleInput.value, ruleTarget.value)
+    ruleInput.value = errors.filter((e) => !e.duplicate).map((e) => e.text).join('\n')
+    return next
+  })
+
+const pickedRules = ref<string[]>([])
+const allRulesPicked = computed(() => state.value.rules.length > 0 && pickedRules.value.length === state.value.rules.length)
+const togglePickAllRules = () => (pickedRules.value = allRulesPicked.value ? [] : state.value.rules.map((r) => r.id))
+
+function deleteRules(ids: string[]) {
+  const only = ids.length === 1 && state.value.rules.find((r) => r.id === ids[0])
+  if (!confirm(only ? `删除规则「${formatRule(only)}」？` : `删除选中的 ${ids.length} 条规则？`)) return
+  run(async () => {
+    const next = await api.deleteRules(ids)
+    pickedRules.value = pickedRules.value.filter((id) => !ids.includes(id))
+    return next
+  })
+}
+
+const moveRule = (index: number, delta: number) => run(() => api.reorderRules(swapped(state.value.rules, index, delta)))
+
+function resetRules() {
+  if (!confirm(`恢复默认规则？现有的 ${state.value.rules.length} 条规则会被替换。`)) return
+  run(async () => {
+    const next = await api.resetRules()
+    pickedRules.value = []
+    return next
+  })
+}
+
+const ruleDialog = ref<HTMLDialogElement>()
+const ruleDraft = ref<RuleRecord | null>(null)
+const ruleEditError = ref('')
+
+async function editRule(rule: RuleRecord) {
+  ruleDraft.value = { ...rule, options: [...rule.options] }
+  ruleEditError.value = ''
+  await nextTick()
+  ruleDialog.value?.showModal()
+}
+
+async function saveRule() {
+  const { id, ...rule } = ruleDraft.value!
+  try {
+    const next = await api.putRule(id, rule.type === 'MATCH' ? { ...rule, payload: '', options: [] } : rule)
+    ruleDialog.value?.close()
+    run(async () => next)
+  } catch (e) {
+    ruleEditError.value = (e as Error).message
+  }
 }
 
 const resetToken = () => run(api.resetToken)
@@ -363,6 +434,73 @@ const dialerOptions = (node: NodeRecord) =>
       <p class="hint">前置节点：流量先到前置节点，再由它连接当前节点（本机 → 前置 → 当前节点 → 目标）。仅在 Clash 订阅中生效。</p>
     </section>
 
+    <section class="card" aria-labelledby="rules-title">
+      <h2 id="rules-title">分流规则 <span class="muted">{{ state.rules.length }}</span></h2>
+      <label for="rule-lines">添加规则，一行一条，格式为「类型,匹配内容,目标」，可以直接粘贴 Clash 配置里的 rules 列表（已存在的规则自动跳过）</label>
+      <textarea id="rule-lines" v-model="ruleInput" rows="3" spellcheck="false" placeholder="DOMAIN-SUFFIX,openai.com,proxy&#10;IP-CIDR,10.0.0.0/8,DIRECT,no-resolve&#10;DOMAIN-KEYWORD,google" />
+      <ul v-if="parsedRules.errors.length" class="line-errors" aria-live="polite">
+        <li v-for="e in parsedRules.errors" :key="e.line">第 {{ e.line }} 行：{{ e.error }}</li>
+      </ul>
+      <div class="row rules-add">
+        <button class="primary" :disabled="busy || !parsedRules.rules.length" @click="addRules">添加 {{ parsedRules.rules.length }} 条规则</button>
+        <label class="inline">
+          没写目标的行发往
+          <select v-model="ruleTarget">
+            <option v-for="t in targets" :key="t" :value="t">{{ t }}</option>
+          </select>
+        </label>
+        <span v-if="badRules" class="muted">{{ badRules }} 行无法识别，添加后会留在输入框中</span>
+      </div>
+
+      <p v-if="loaded && !state.rules.length" class="empty">还没有规则，所有流量都会直连。</p>
+      <div v-if="pickedRules.length" class="row batch" role="toolbar" aria-label="规则批量操作">
+        <span>已选 {{ pickedRules.length }} 条</span>
+        <button class="danger" :disabled="busy" @click="deleteRules(pickedRules)">删除</button>
+        <button @click="pickedRules = []">取消选择</button>
+      </div>
+      <div v-if="state.rules.length" class="table-wrap">
+        <table class="rules">
+          <thead>
+            <tr>
+              <th scope="col"><input type="checkbox" :checked="allRulesPicked" aria-label="全选规则" @change="togglePickAllRules" /></th>
+              <th scope="col">顺序</th>
+              <th scope="col">类型</th>
+              <th scope="col">匹配内容</th>
+              <th scope="col">目标</th>
+              <th scope="col">参数</th>
+              <th scope="col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(rule, i) in state.rules" :key="rule.id">
+              <td><input v-model="pickedRules" type="checkbox" :value="rule.id" :aria-label="`选择规则 ${formatRule(rule)}`" /></td>
+              <td class="mono">{{ i + 1 }}</td>
+              <td><span class="badge">{{ rule.type }}</span></td>
+              <td class="mono payload">
+                <template v-if="rule.payload">{{ rule.payload }}</template>
+                <span v-else class="muted">其余全部流量</span>
+              </td>
+              <td>
+                {{ rule.target }}
+                <span v-if="!targets.includes(rule.target)" class="tag">目标不可用，未输出</span>
+              </td>
+              <td class="mono">{{ rule.options.join(', ') }}</td>
+              <td class="actions">
+                <button :disabled="busy" :aria-label="`编辑规则 ${formatRule(rule)}`" @click="editRule(rule)">编辑</button>
+                <button :disabled="busy || i === 0" :aria-label="`上移规则 ${formatRule(rule)}`" @click="moveRule(i, -1)">上移</button>
+                <button :disabled="busy || i === state.rules.length - 1" :aria-label="`下移规则 ${formatRule(rule)}`" @click="moveRule(i, 1)">下移</button>
+                <button class="danger" :disabled="busy" :aria-label="`删除规则 ${formatRule(rule)}`" @click="deleteRules([rule.id])">删除</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">规则从上到下匹配，命中第一条就停止，所以 MATCH 要放在最后；新添加的规则排在最前面。规则只在 Clash 订阅中生效，小火箭订阅只包含节点。</p>
+      <div class="row">
+        <button :disabled="busy" @click="resetRules">恢复默认规则</button>
+      </div>
+    </section>
+
     <section class="card" aria-labelledby="output-title">
       <h2 id="output-title">订阅链接</h2>
       <ul v-if="preview.warnings.length" class="alert warn">
@@ -419,6 +557,34 @@ const dialerOptions = (node: NodeRecord) =>
       <div class="row">
         <button type="submit" class="primary">保存</button>
         <button type="button" @click="dialog?.close()">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog ref="ruleDialog" aria-labelledby="rule-title" @close="ruleDraft = null">
+    <form v-if="ruleDraft" class="fields" @submit.prevent="saveRule">
+      <h2 id="rule-title">编辑规则</h2>
+      <label for="rule-type">类型</label>
+      <select id="rule-type" v-model="ruleDraft.type">
+        <option v-for="t in RULE_TYPES" :key="t" :value="t">{{ t }}</option>
+      </select>
+      <template v-if="ruleDraft.type !== 'MATCH'">
+        <label for="rule-payload">匹配内容</label>
+        <input id="rule-payload" v-model="ruleDraft.payload" class="mono" spellcheck="false" required />
+      </template>
+      <label for="rule-to">目标</label>
+      <select id="rule-to" v-model="ruleDraft.target">
+        <option v-if="!targets.includes(ruleDraft.target)" :value="ruleDraft.target">{{ ruleDraft.target }}（不可用）</option>
+        <option v-for="t in targets" :key="t" :value="t">{{ t }}</option>
+      </select>
+      <div v-if="ruleDraft.type !== 'MATCH'" class="row">
+        <label v-for="o in RULE_OPTIONS" :key="o" class="inline"><input v-model="ruleDraft.options" type="checkbox" :value="o" />{{ o }}</label>
+        <span class="muted">参数只对 IP 类规则有效</span>
+      </div>
+      <p v-if="ruleEditError" class="alert error" role="alert">{{ ruleEditError }}</p>
+      <div class="row">
+        <button type="submit" class="primary">保存</button>
+        <button type="button" @click="ruleDialog?.close()">取消</button>
       </div>
     </form>
   </dialog>

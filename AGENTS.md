@@ -4,7 +4,7 @@ Clash / Shadowrocket subscription generator. Stack: yarn (v1) + Vue 3 + Vite + T
 
 ## Layout
 
-- `shared/` – pure functions used by both sides: URI parsers (`parse.ts`), Clash YAML import and proxy-to-URI conversion (`yaml.ts`), Clash YAML / Shadowrocket renderers and chain validation (`render.ts`)
+- `shared/` – pure functions used by both sides: URI parsers (`parse.ts`), Clash YAML import and proxy-to-URI conversion (`yaml.ts`), Clash YAML / Shadowrocket renderers and chain validation (`render.ts`), routing rule parser and validation (`rules.ts`)
 - `server/` – Hono API (`app.ts`), JSON file store (`store.ts`, writes `data/db.json`, git-ignored)
 - `src/` – Vue panel (single page, `App.vue`)
 
@@ -27,5 +27,7 @@ Env: `ADMIN_PASSWORD`, `IMPORT_ALLOW_PRIVATE`, `PUBLIC_URL` (when set, the origi
 
 - Dependencies are pinned to exact versions; prefer releases at least 7 days old.
 - New protocols: add a parser in `shared/parse.ts` and a test in `shared/shared.test.ts`.
+- New rule types: add them to `RULE_TYPES` in `shared/rules.ts`; types that need config sections the panel does not generate (`rule-providers`, `sub-rules`) go in `UNSUPPORTED` instead.
 - New output formats: add a renderer in `shared/render.ts` and a `target` case in `/sub/:token/:target`.
 - Chains: Clash uses `dialer-proxy`; Shadowrocket uses a `chain=<dialer name>` query parameter on the node link (undocumented, confirmed on a real device). Both come from `plan()` in `shared/render.ts`; Shadowrocket drops chained nodes whose protocol is in `ROCKET_NO_CHAIN` or whose dialer is not in its output, with a warning, rather than letting them connect directly.
+- Rules: stored in `state.rules` (seeded from `shared/template.ts`, also when an older `db.json` has none) and only used by the Clash output. A rule target is the `proxy` group, a built-in policy, or an output proxy name; `renderClash` drops rules whose target is not in the output, with a warning, and node renames go through `renameNode()` in `server/app.ts` so rule targets follow, for disabled nodes too.

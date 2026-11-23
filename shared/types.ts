@@ -62,9 +62,21 @@ export interface ImportResult {
   state: AppState
 }
 
+export interface Rule {
+  type: string
+  payload: string
+  target: string
+  options: string[]
+}
+
+export interface RuleRecord extends Rule {
+  id: string
+}
+
 export interface AppState {
   token: string
   nodes: NodeRecord[]
+  rules: RuleRecord[]
 }
 
 export interface Preview {

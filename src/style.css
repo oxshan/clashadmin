@@ -535,3 +535,34 @@ pre {
     transition: none !important;
   }
 }
+
+.rules-add {
+  margin-bottom: 16px;
+}
+
+.row > label.inline {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.row > label.inline select {
+  width: auto;
+}
+
+.rules td {
+  padding-top: 10px;
+  vertical-align: middle;
+}
+
+.rules .badge {
+  margin-top: 0;
+}
+
+.rules .payload {
+  white-space: normal;
+  word-break: break-all;
+}
+
+.fields > label {
+  margin-top: 12px;
+}

@@ -3,16 +3,18 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import type { AppState } from '../shared/types'
+import { defaultRules, formatRule } from '../shared/rules'
+import type { AppState, ParseError } from '../shared/types'
 import { createApp } from './app'
 import { type AuthData, createAuth, hashPassword } from './auth'
+import { seedRules } from './store'
 
 const LINES = ['hysteria2://pw@1.1.1.1:443?sni=a.com#front', 'vless://uuid@2.2.2.2:443?security=tls&sni=b.com#exit', 'bad line'].join('\n')
 
 const PASSWORD = 'correct horse battery'
 
 function build(now: () => number = Date.now) {
-  const state: AppState = { token: 'secret-token', nodes: [] }
+  const state: AppState = { token: 'secret-token', nodes: [], rules: seedRules() }
   const authData: AuthData = { ...hashPassword(PASSWORD), sessions: {} }
   const app = createApp(state, () => {}, createAuth(authData, () => {}, now))
   const send = (path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}) =>
@@ -162,6 +164,65 @@ describe('preview, selection, batch and edit', () => {
   })
 })
 
+describe('rules api', () => {
+  const DEFAULTS = defaultRules.map(formatRule)
+
+  it('starts from the default rules and adds parsed rules on top', async () => {
+    const { state, call } = await setup()
+    expect(state.rules.map(formatRule)).toEqual(DEFAULTS)
+    const res = await call('/api/rules', 'POST', { text: 'DOMAIN-SUFFIX,openai.com,exit\nDOMAIN,a.com\nMATCH,proxy\nDOMAIN,b.com,nobody', target: 'DIRECT' })
+    const body = await res.json()
+    expect(body.added).toBe(2)
+    expect(body.errors.map((e: ParseError) => [e.line, Boolean(e.duplicate)])).toEqual([
+      [3, true],
+      [4, false],
+    ])
+    expect(state.rules.map(formatRule)).toEqual(['DOMAIN-SUFFIX,openai.com,exit', 'DOMAIN,a.com,DIRECT', ...DEFAULTS])
+    expect(new Set(state.rules.map((r) => r.id)).size).toBe(state.rules.length)
+  })
+
+  it('edits, reorders, deletes and resets rules', async () => {
+    const { state, call } = await setup()
+    const ids = state.rules.map((r) => r.id)
+    const put = (id: string, body: unknown) => call(`/api/rules/${id}`, 'PUT', body)
+    expect((await put(ids[0], { type: 'domain', payload: ' a.com ', target: 'front', options: [] })).status).toBe(200)
+    expect(formatRule(state.rules[0])).toBe('DOMAIN,a.com,front')
+    const { id: _, ...twin } = state.rules[1]
+    for (const bad of [{ type: 'DOMAIN', payload: 'a.com', target: 'nobody' }, { type: 'DOMAIN', payload: '', target: 'proxy' }, { type: 'RULE-SET', payload: 'x', target: 'proxy' }, twin])
+      expect((await put(ids[0], bad)).status).toBe(400)
+    expect((await put('missing', { type: 'DOMAIN', payload: 'a.com', target: 'proxy' })).status).toBe(404)
+    expect(formatRule(state.rules[0])).toBe('DOMAIN,a.com,front')
+
+    expect((await call('/api/rules/reorder', 'POST', { ids: ids.slice(1) })).status).toBe(400)
+    await call('/api/rules/reorder', 'POST', { ids: [ids[1], ids[0], ...ids.slice(2)] })
+    expect(state.rules.map((r) => r.id).slice(0, 2)).toEqual([ids[1], ids[0]])
+
+    expect((await call('/api/rules/delete', 'POST', { ids: 'all' })).status).toBe(400)
+    await call('/api/rules/delete', 'POST', { ids: ids.slice(0, 2) })
+    expect(state.rules.map((r) => r.id)).toEqual(ids.slice(2))
+    await call('/api/rules/reset', 'POST')
+    expect(state.rules.map(formatRule)).toEqual(DEFAULTS)
+  })
+
+  it('writes rules into the clash subscription and follows node renames', async () => {
+    const { state, call } = await setup()
+    const [front, exit] = state.nodes
+    const sub = async () => parse(await (await call('/sub/secret-token/clash')).text()).rules
+    await call('/api/rules', 'POST', { text: 'DOMAIN,a.com,exit\nDOMAIN,b.com,front' })
+    await call(`/api/nodes/${exit.id}`, 'PATCH', { name: 'tokyo' })
+    await call(`/api/nodes/${front.id}`, 'PUT', { yaml: '{name: osaka, type: hysteria2, server: 1.1.1.1, port: 443, password: pw, sni: a.com}' })
+    expect(await sub()).toEqual(['DOMAIN,a.com,tokyo', 'DOMAIN,b.com,osaka', ...DEFAULTS])
+
+    await call(`/api/nodes/${exit.id}`, 'PATCH', { enabled: false })
+    expect(await sub()).toEqual(['DOMAIN,b.com,osaka', ...DEFAULTS])
+    expect((await (await call('/api/preview')).json()).warnings.join()).toContain('DOMAIN,a.com,tokyo')
+
+    await call(`/api/nodes/${exit.id}`, 'PATCH', { name: 'kyoto' })
+    await call(`/api/nodes/${exit.id}`, 'PATCH', { enabled: true })
+    expect((await sub())[0]).toBe('DOMAIN,a.com,kyoto')
+  })
+})
+
 describe('auth', () => {
   const ROUTES: [string, string][] = [
     ['GET', '/api/state'],
@@ -175,6 +236,11 @@ describe('auth', () => {
     ['PATCH', '/api/nodes/x'],
     ['DELETE', '/api/nodes/x'],
     ['POST', '/api/nodes/reorder'],
+    ['POST', '/api/rules'],
+    ['PUT', '/api/rules/x'],
+    ['POST', '/api/rules/delete'],
+    ['POST', '/api/rules/reorder'],
+    ['POST', '/api/rules/reset'],
     ['POST', '/api/token/reset'],
     ['POST', '/api/logout'],
     ['GET', '/api/anything-else'],
@@ -275,7 +341,7 @@ describe('auth', () => {
 describe('public url', () => {
   it('reports the configured public url as the only origin', async () => {
     const authData: AuthData = { ...hashPassword(PASSWORD), sessions: {} }
-    const make = (publicUrl?: string) => createApp({ token: 't', nodes: [] }, () => {}, createAuth(authData, () => {}), () => ['http://10.0.0.2:8787'], publicUrl)
+    const make = (publicUrl?: string) => createApp({ token: 't', nodes: [], rules: [] }, () => {}, createAuth(authData, () => {}), () => ['http://10.0.0.2:8787'], publicUrl)
     const lan = async (app: ReturnType<typeof make>) => {
       const login = await app.request('/api/login', { method: 'POST', body: JSON.stringify({ password: PASSWORD }), headers: { 'Content-Type': 'application/json' } })
       return (await app.request('/api/lan', { headers: { Cookie: login.headers.get('set-cookie')!.split(';')[0] } })).json()

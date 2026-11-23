@@ -3,17 +3,24 @@ import type { IncomingMessage } from 'node:http'
 import { type Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { RESERVED_NAMES, nodeKey, parseLines, uniqueName } from '../shared/parse'
-import { chainError, renderClash, renderShadowrocket, rocketUri } from '../shared/render'
-import type { AppState, BatchAction, ImportResult, NodeRecord, Preview, YamlPreview } from '../shared/types'
+import { chainError, nodeNames, renamed, renderClash, renderShadowrocket, rocketUri, ruleTargets } from '../shared/render'
+import { formatRule, parseRules, ruleError } from '../shared/rules'
+import type { AppState, BatchAction, ImportResult, NodeRecord, Preview, Rule, YamlPreview } from '../shared/types'
 import { parseClashYaml, parseProxyYaml, toUri } from '../shared/yaml'
 import { type Auth, SESSION_TTL } from './auth'
 import { loadSource } from './source'
-import { newToken } from './store'
+import { newToken, seedRules } from './store'
 
 const tokenMatches = (given: string, expected: string) => {
   const a = Buffer.from(given)
   const b = Buffer.from(expected)
   return a.length === b.length && timingSafeEqual(a, b)
+}
+
+function reordered<T extends { id: string }>(list: T[], ids: unknown): T[] | null {
+  const byId = new Map(list.map((item) => [item.id, item]))
+  const valid = Array.isArray(ids) && ids.length === byId.size && new Set(ids).size === ids.length && ids.every((id) => byId.has(id))
+  return valid ? ids.map((id) => byId.get(id)!) : null
 }
 
 type Env = { Bindings: { incoming?: IncomingMessage } }
@@ -36,6 +43,13 @@ function sameOrigin(c: Context<Env>): boolean {
 export function createApp(state: AppState, persist: (state: AppState) => unknown, auth: Auth, lanOrigins: () => string[] = () => [], publicUrl = '') {
   const app = new Hono<Env>()
   const commit = () => (persist(state), state)
+
+  const renameNode = (apply: () => void) => {
+    const before = nodeNames(state.nodes)
+    apply()
+    const moved = renamed(before, nodeNames(state.nodes))
+    for (const r of state.rules) r.target = moved.get(r.target) ?? r.target
+  }
 
   const startSession = (c: Context<Env>) =>
     setCookie(c, COOKIE, auth.createSession(), {
@@ -88,7 +102,7 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
   app.get('/api/state', (c) => c.json(state))
 
   app.get('/api/preview', (c) => {
-    const { yaml, warnings } = renderClash(state.nodes)
+    const { yaml, warnings } = renderClash(state.nodes, state.rules)
     const rocket = renderShadowrocket(state.nodes)
     return c.json({ clash: yaml, shadowrocket: rocket.text, warnings: [...new Set([...warnings, ...rocket.warnings])] } satisfies Preview)
   })
@@ -186,7 +200,7 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
     const key = nodeKey(proxy)
     const twin = others.find((n) => nodeKey(n.proxy) === key)
     if (twin) return c.json({ error: `与节点「${twin.name}」重复（类型、地址、端口、凭据相同）` }, 400)
-    Object.assign(node, { name: proxy.name, type: proxy.type, server: proxy.server, port: proxy.port, proxy, uri: toUri(proxy) })
+    renameNode(() => Object.assign(node, { name: proxy.name, type: proxy.type, server: proxy.server, port: proxy.port, proxy, uri: toUri(proxy) }))
     return c.json(commit())
   })
 
@@ -199,7 +213,7 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
       if (!name) return c.json({ error: '名称不能为空' }, 400)
       const others = new Set([...RESERVED_NAMES, ...state.nodes.filter((n) => n !== node).map((n) => n.name)])
       if (uniqueName(name, others) !== name) return c.json({ error: '名称已存在或是保留名称' }, 400)
-      node.name = node.proxy.name = name
+      renameNode(() => (node.name = node.proxy.name = name))
     }
     if (body.dialerId !== undefined) {
       const error = chainError(state.nodes, node.id, body.dialerId)
@@ -219,11 +233,53 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
   })
 
   app.post('/api/nodes/reorder', async (c) => {
+    const nodes = reordered(state.nodes, (await c.req.json<{ ids: string[] }>()).ids)
+    if (!nodes) return c.json({ error: '排序列表与现有节点不一致' }, 400)
+    state.nodes = nodes
+    return c.json(commit())
+  })
+
+  app.post('/api/rules', async (c) => {
+    const { text, target } = await c.req.json<{ text: string; target?: string }>()
+    const { rules, errors } = parseRules(String(text ?? ''), { fallback: String(target ?? ''), targets: ruleTargets(state.nodes), existing: state.rules })
+    state.rules.unshift(...rules.map((r) => ({ ...r, id: randomUUID() })))
+    commit()
+    return c.json({ added: rules.length, errors, state } satisfies ImportResult)
+  })
+
+  app.put('/api/rules/:id', async (c) => {
+    const rule = state.rules.find((r) => r.id === c.req.param('id'))
+    if (!rule) return c.json({ error: '规则不存在' }, 404)
+    const body = await c.req.json<Partial<Rule>>()
+    const next: Rule = {
+      type: String(body.type ?? '').trim().toUpperCase(),
+      payload: String(body.payload ?? '').trim(),
+      target: String(body.target ?? ''),
+      options: Array.isArray(body.options) ? body.options.map(String) : [],
+    }
+    const twin = state.rules.some((r) => r !== rule && formatRule(r) === formatRule(next))
+    const error = ruleError(next, ruleTargets(state.nodes)) ?? (twin ? '已有一条相同的规则' : null)
+    if (error) return c.json({ error }, 400)
+    Object.assign(rule, next)
+    return c.json(commit())
+  })
+
+  app.post('/api/rules/delete', async (c) => {
     const { ids } = await c.req.json<{ ids: string[] }>()
-    const byId = new Map(state.nodes.map((n) => [n.id, n]))
-    if (!Array.isArray(ids) || ids.length !== byId.size || new Set(ids).size !== ids.length || !ids.every((id) => byId.has(id)))
-      return c.json({ error: '排序列表与现有节点不一致' }, 400)
-    state.nodes = ids.map((id) => byId.get(id)!)
+    if (!Array.isArray(ids)) return c.json({ error: '参数无效' }, 400)
+    state.rules = state.rules.filter((r) => !ids.includes(r.id))
+    return c.json(commit())
+  })
+
+  app.post('/api/rules/reorder', async (c) => {
+    const rules = reordered(state.rules, (await c.req.json<{ ids: string[] }>()).ids)
+    if (!rules) return c.json({ error: '排序列表与现有规则不一致' }, 400)
+    state.rules = rules
+    return c.json(commit())
+  })
+
+  app.post('/api/rules/reset', (c) => {
+    state.rules = seedRules()
     return c.json(commit())
   })
 
@@ -240,7 +296,7 @@ export function createApp(state: AppState, persist: (state: AppState) => unknown
       case 'clash':
         c.header('Content-Type', 'text/yaml; charset=utf-8')
         c.header('Content-Disposition', `attachment; filename=clash-${Math.floor(Date.now() / 1000)}.yaml`)
-        return c.body(renderClash(state.nodes).yaml)
+        return c.body(renderClash(state.nodes, state.rules).yaml)
       case 'shadowrocket':
         return c.text(Buffer.from(renderShadowrocket(state.nodes).text).toString('base64'))
       default:
